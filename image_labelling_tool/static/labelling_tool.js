@@ -563,7 +563,7 @@ function LabellingTool() {
                         ctx.strokeStyle = connection_stroke_colour;
                         ctx.stroke();
                         if (ctx.setLineDash) {
-                            ctx.setLineDash([]);
+                            ctx.setLineDash(null);
                         }
                     }
                 }
@@ -785,7 +785,7 @@ function LabellingTool() {
 
         self.on_move = function(pos, event) {
             self._highlight_entities(self._get_entities_in_range(pos));
-            self._brush_centre = pos;
+            self._brush_centre = self._view.get_mouse_pos_screen_space();
             self.queue_redraw();
             return true;
         };
@@ -795,7 +795,7 @@ function LabellingTool() {
             for (var i = 0; i < entities.length; i++) {
                 self._view.select_entity(entities[i], true, false);
             }
-            self._brush_centre = pos;
+            self._brush_centre = self._view.get_mouse_pos_screen_space();
             self.queue_redraw();
             return true;
         };
@@ -826,7 +826,7 @@ function LabellingTool() {
 
         self.on_switch_in = function(pos) {
             self._highlight_entities(self._get_entities_in_range(pos));
-            self._brush_centre = pos;
+            self._brush_centre = self._view.get_mouse_pos_screen_space();
             self.queue_redraw();
         };
 
@@ -1489,6 +1489,8 @@ function LabellingTool() {
             LabellingToolSelf.$tool.paint(LabellingToolSelf.canvasContext,
                 LabellingToolSelf.$scale_x, LabellingToolSelf.$scale_y);
         }
+
+        console.log(LabellingToolSelf.canvasContext.getLineDash());
     };
 
 
