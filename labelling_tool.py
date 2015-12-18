@@ -76,6 +76,13 @@ class ImageLabels (object):
         self.labels_json = labels_json
 
 
+    def __len__(self):
+        return len(self.labels_json)
+
+    def __getitem__(self, item):
+        return self.labels_json[item]
+
+
     def warp(self, xform_fn):
         """
         Warp the labels given a warping function
