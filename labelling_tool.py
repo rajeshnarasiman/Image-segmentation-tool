@@ -23,7 +23,6 @@
 # Developed by Geoffrey French in collaboration with Dr. M. Fisher and
 # Dr. M. Mackiewicz.
 
-
 import mimetypes, json, os, glob, copy, io, math
 
 import numpy as np
@@ -89,6 +88,384 @@ def _simplify_contour(cs):
         if cs.shape[0] > 0:
             return cs
     return None
+
+
+
+class Vector2 (object):
+    def __init__(self, x=0.0, y=0.0):
+        self.x = x
+        self.y = y
+
+    def __add__(self, other):
+        if isinstance(other, Vector2):
+            return Vector2(self.x + other.x, self.y + other.y)
+        elif isinstance(other, float):
+            return Vector2(self.x + other, self.y + other)
+        else:
+            raise TypeError('other must be a Vector2 or a float, not a {}'.format(type(other)))
+
+    def __sub__(self, other):
+        if isinstance(other, Vector2):
+            return Vector2(self.x - other.x, self.y - other.y)
+        elif isinstance(other, float):
+            return Vector2(self.x - other, self.y - other)
+        else:
+            raise TypeError('other must be a Vector2 or a float, not a {}'.format(type(other)))
+
+    def __mul__(self, other):
+        if isinstance(other, float):
+            return Vector2(self.x + other.x, self.y + other.y)
+        else:
+            raise TypeError('other must be a float, not a {}'.format(type(other)))
+
+    @staticmethod
+    def min(a, b):
+        return Vector2(min(a.x, b.x), min(a.y, b.y))
+
+    @staticmethod
+    def max(a, b):
+        return Vector2(max(a.x, b.x), max(a.y, b.y))
+
+
+    def as_json(self):
+        return {'x': self.x, 'y': self.y}
+
+    @classmethod
+    def from_json(cls, j):
+        return Vector2(j['x'], j['y'])
+
+    @staticmethod
+    def as_array(vertices):
+        return np.array([[v.y, v.x] for v in vertices])
+
+    @staticmethod
+    def from_array(arr):
+        return [Vector2(arr[i,1], arr[i,0]) for i in range(arr.shape[0])]
+
+
+class AABox (object):
+    def __init__(self, lower, upper):
+        if not isinstance(lower, Vector2):
+            raise TypeError('lower must be a Vector2')
+        if not isinstance(upper, Vector2):
+            raise TypeError('upper must be a Vector2')
+        self.lower = lower
+        self.upper = upper
+
+    @property
+    def centre(self):
+        return (self.lower + self.upper) * 0.5
+
+    @property
+    def size(self):
+        return self.upper - self.lower
+
+    @staticmethod
+    def from_points(points):
+        if len(points) == 0:
+            return None
+        else:
+            lower = upper = points[0]
+            for p in points[1:]:
+                lower = Vector2.min(lower, p)
+                upper = Vector2.max(upper, p)
+            return AABox(lower, upper)
+
+    @staticmethod
+    def from_boxes(boxes):
+        if len(boxes) == 0:
+            return None
+        elif len(boxes) == 1:
+            return boxes[0]
+        else:
+            lower = boxes[0].lower
+            upper = boxes[0].upper
+            for b in boxes[1:]:
+                lower = Vector2.min(lower, b.lower)
+                upper = Vector2.max(upper, b.upper)
+            return AABox(lower, upper)
+
+
+_LABEL_TYPE_REGISTRY = {}
+
+def register_label_class(cls):
+    _LABEL_TYPE_REGISTRY[cls.JSON_NAME] = cls
+    return cls
+
+
+class AbstractLabel (object):
+    JSON_NAME = None
+
+    def __init__(self, root, label_class=None, object_id=None):
+        self.root = root
+        self.label_class = label_class
+        self.object_id = object_id
+        self.aabox = None
+        self.root.register_label(object_id, self)
+
+    def warped(self, xform_fn):
+        raise NotImplementedError('Abstract for type {}'.format(type(self)))
+
+    def render_mask(self, width, height, fill):
+        raise NotImplementedError('Abstract for type {}'.format(type(self)))
+
+    def as_json(self):
+        return {'label_type': self.JSON_NAME, 'label_class': self.label_class,
+                'object_id': self.object_id}
+
+    @classmethod
+    def from_json(cls, root, j):
+        raise NotImplementedError('Abstract for type {}'.format(cls))
+
+
+@register_label_class
+class PointLabel (AbstractLabel):
+    JSON_NAME = 'point'
+
+    def __init__(self, root, label_class=None, object_id=None, position=None):
+        super(PointLabel, self).__init__(root, label_class, object_id)
+        if position is None:
+            position = Vector2()
+        self.position = position
+        self.aabox = AABox(position, position)
+
+    def warped(self, xform_fn):
+        """
+        Warp the label given a warping function
+
+        :param xform_fn: a transformation function of the form `f(vertices) -> warped_vertices`, where `vertices` and
+        `warped_vertices` are both Numpy arrays of shape `(N,2)` where `N` is the number of vertices and the
+        co-ordinates are `x,y` pairs. The transformations defined in `skimage.transform`, e.g. `AffineTransform` can
+        be used here.
+        :return: an AbstractLabel instance
+        """
+        warped_verts = Vector2.from_array(xform_fn(Vector2.as_array([self.position])))
+        return PointLabel(warped_verts[0], self.label_class)
+
+    def render_mask(self, width, height, fill):
+        img = Image.new('L', (width, height), 0)
+        ImageDraw.Draw(img).point([(self.position.x, self.position.y)], fill=0)
+        mask = np.array(img)
+        return mask
+
+    def as_json(self):
+        j = super(PointLabel, self).as_json()
+        j['position'] = self.position.as_json()
+        return j
+
+    @classmethod
+    def from_json(cls, root, j):
+        return PointLabel(root, label_class=j['label_class'], object_id=j['object_id'],
+                          position=Vector2.from_json(j['position']))
+
+
+@register_label_class
+class BoxLabel (AbstractLabel):
+    JSON_NAME = 'box'
+
+    def __init__(self, root, label_class=None, object_id=None, centre=None, size=None):
+        super(BoxLabel, self).__init__(root, label_class, object_id)
+        if centre is None:
+            centre = Vector2()
+        if size is None:
+            size = Vector2()
+        self.centre = centre
+        self.size = size
+        self.aabox = AABox(centre - size * 0.5, centre + size * 0.5)
+
+    def corners(self):
+        half_size = self.size * 0.5
+        return [
+            self.centre + Vector2(-half_size.x, -half_size.y),
+            self.centre + Vector2(half_size.x, -half_size.y),
+            self.centre + Vector2(half_size.x, half_size.y),
+            self.centre + Vector2(-half_size.x, half_size.y),
+        ]
+
+    def warped(self, xform_fn):
+        """
+        Warp the label given a warping function
+
+        :param xform_fn: a transformation function of the form `f(vertices) -> warped_vertices`, where `vertices` and
+        `warped_vertices` are both Numpy arrays of shape `(N,2)` where `N` is the number of vertices and the
+        co-ordinates are `x,y` pairs. The transformations defined in `skimage.transform`, e.g. `AffineTransform` can
+        be used here.
+        :return: an AbstractLabel instance
+        """
+        warped_corners = Vector2.from_array(xform_fn(Vector2.as_array(self.corners())))
+        warped_box = AABox.from_points(warped_corners)
+        return BoxLabel(warped_box.centre, warped_box.size, self.label_class)
+
+    def render_mask(self, width, height, fill):
+        lower = self.aabox.lower
+        upper = self.aabox.upper
+        img = Image.new('L', (width, height), 0)
+        if fill:
+            ImageDraw.Draw(img).rectangle([(lower.x, lower.y), (upper.x, upper.y)], outline=1, fill=1)
+        else:
+            ImageDraw.Draw(img).rectangle([(lower.x, lower.y), (upper.x, upper.y)], outline=1, fill=0)
+        mask = np.array(img)
+        return mask
+
+    def as_json(self):
+        j = super(BoxLabel, self).as_json()
+        j['centre'] = self.centre.as_json()
+        j['size'] = self.size.as_json()
+        return j
+
+    @classmethod
+    def from_json(cls, root, j):
+        return BoxLabel(root, label_class=j['label_class'], object_id=j['object_id'],
+                        centre=Vector2.from_json(j['centre']), size=Vector2.from_json(j['size']))
+
+
+@register_label_class
+class PolygonLabel (AbstractLabel):
+    JSON_NAME = 'box'
+
+    def __init__(self, root, label_class=None, object_id=None, vertices=None):
+        super(PolygonLabel, self).__init__(root, label_class, object_id)
+        if vertices is None:
+            vertices = []
+        self.vertices = vertices
+        self.aabox = AABox.from_points(vertices)
+
+    def warped(self, xform_fn):
+        """
+        Warp the label given a warping function
+
+        :param xform_fn: a transformation function of the form `f(vertices) -> warped_vertices`, where `vertices` and
+        `warped_vertices` are both Numpy arrays of shape `(N,2)` where `N` is the number of vertices and the
+        co-ordinates are `x,y` pairs. The transformations defined in `skimage.transform`, e.g. `AffineTransform` can
+        be used here.
+        :return: an AbstractLabel instance
+        """
+        warped_verts = Vector2.from_array(xform_fn(Vector2.as_array(self.vertices)))
+        return PolygonLabel(warped_verts, self.label_class)
+
+    def render_mask(self, width, height, fill):
+        polygon = [(v.x, v.y)  for v in self.vertices]
+        img = Image.new('L', (width, height), 0)
+        if fill:
+            ImageDraw.Draw(img).polygon(polygon, outline=1, fill=1)
+        else:
+            ImageDraw.Draw(img).polygon(polygon, outline=1, fill=0)
+        mask = np.array(img)
+        return mask
+
+    def as_json(self):
+        j = super(PolygonLabel, self).as_json()
+        j['vertices'] = [v.as_json() for v in self.vertices]
+        return j
+
+    @classmethod
+    def from_json(cls, root, j):
+        return PolygonLabel(root, label_class=j['label_class'], object_id=j['object_id'],
+                            vertices=[Vector2.from_json(j_v) for j_v in j['vertices']])
+
+
+@register_label_class
+class CompositeLabel (AbstractLabel):
+    JSON_NAME = 'composite'
+
+    def __init__(self, root, label_class=None, object_id=None, component_object_ids=None):
+        super(CompositeLabel, self).__init__(root, label_class, object_id)
+        if component_object_ids is None:
+            component_object_ids = []
+        self.component_object_ids = component_object_ids
+        self.__component_models = None
+        self.aabox = None
+
+    @property
+    def component_models(self):
+        if self.__component_models is None:
+            self.__component_models = [self.root.get_label_by_id(obj_id) for obj_id in self.component_object_ids]
+        return self.__component_models
+
+    def warped(self, xform_fn):
+        """
+        Warp the label given a warping function
+
+        :param xform_fn: a transformation function of the form `f(vertices) -> warped_vertices`, where `vertices` and
+        `warped_vertices` are both Numpy arrays of shape `(N,2)` where `N` is the number of vertices and the
+        co-ordinates are `x,y` pairs. The transformations defined in `skimage.transform`, e.g. `AffineTransform` can
+        be used here.
+        :return: an AbstractLabel instance
+        """
+        return CompositeLabel(self.component_object_ids, self.label_class, self.object_id)
+
+    def render_mask(self, width, height, fill):
+        return None
+
+    def as_json(self):
+        j = super(CompositeLabel, self).as_json()
+        j['components'] = self.component_object_ids
+        return j
+
+    @classmethod
+    def from_json(cls, root, j):
+        return CompositeLabel(root=root, label_class=j['label_class'], object_id=j['object_id'],
+                              component_object_ids=j['components'])
+
+
+@register_label_class
+class GroupLabel (AbstractLabel):
+    JSON_NAME = 'group'
+
+    def __init__(self, root, label_class=None, object_id=None, component_models=None):
+        super(GroupLabel, self).__init__(root, label_class, object_id)
+        if component_models is None:
+            component_models = []
+        self.component_models = component_models
+        component_boxes = [model.aabox for model in component_models]
+        self.aabox = AABox.from_boxes([box for box in component_boxes if box is not None])
+
+    def warped(self, xform_fn):
+        """
+        Warp the label given a warping function
+
+        :param xform_fn: a transformation function of the form `f(vertices) -> warped_vertices`, where `vertices` and
+        `warped_vertices` are both Numpy arrays of shape `(N,2)` where `N` is the number of vertices and the
+        co-ordinates are `x,y` pairs. The transformations defined in `skimage.transform`, e.g. `AffineTransform` can
+        be used here.
+        :return: an AbstractLabel instance
+        """
+        return GroupLabel([model.warped(xform_fn) for model in self.component_models],
+                          self.label_class, self.object_id)
+
+    def render_mask(self, width, height, fill):
+        return None
+
+    def as_json(self):
+        j = super(GroupLabel, self).as_json()
+        j['component_models'] = [model.as_json() for model in self.component_models]
+        return j
+
+    @classmethod
+    def from_json(cls, root, j):
+        return GroupLabel(root=root, label_class=j['label_class'], object_id=j['object_id'],
+                          component_models=[json_to_label(j_l) for j_l in j['component_models']])
+
+
+
+class ImageLabelsRoot (object):
+    def __init__(self):
+        self.labels = []
+        self._object_id_to_label = {}
+
+
+    def label_from_json(self, j):
+        label_type_cls = _LABEL_TYPE_REGISTRY[j['label_type']]
+        return label_type_cls.from_json(j)
+
+
+    def register_label(self, object_id, label):
+        self._object_id_to_label[object_id] = label
+
+
+    @classmethod
+    def from_json(cls, j):
+        pass
 
 
 
