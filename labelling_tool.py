@@ -193,28 +193,38 @@ def register_label_class(cls):
     return cls
 
 
+def json_to_label(j):
+    label_type_cls = _LABEL_TYPE_REGISTRY[j['label_type']]
+    return label_type_cls.from_json(j)
+
+
 class AbstractLabel (object):
     JSON_NAME = None
 
-    def __init__(self, root, label_class=None, object_id=None):
-        self.root = root
+    def __init__(self, label_class=None, object_id=None):
         self.label_class = label_class
+        self.root = None
         self.object_id = object_id
         self.aabox = None
-        self.root.register_label(object_id, self)
 
     def warped(self, xform_fn):
         raise NotImplementedError('Abstract for type {}'.format(type(self)))
 
-    def render_mask(self, width, height, fill):
+    def render_mask(self, width, height, fill, dx=0.0, dy=0.0):
         raise NotImplementedError('Abstract for type {}'.format(type(self)))
+
+    def notify_registered(self, root):
+        self.root = root
+
+    def notify_unregistered(self, root):
+        self.root = None
 
     def as_json(self):
         return {'label_type': self.JSON_NAME, 'label_class': self.label_class,
                 'object_id': self.object_id}
 
     @classmethod
-    def from_json(cls, root, j):
+    def from_json(cls, j):
         raise NotImplementedError('Abstract for type {}'.format(cls))
 
 
@@ -222,8 +232,8 @@ class AbstractLabel (object):
 class PointLabel (AbstractLabel):
     JSON_NAME = 'point'
 
-    def __init__(self, root, label_class=None, object_id=None, position=None):
-        super(PointLabel, self).__init__(root, label_class, object_id)
+    def __init__(self, label_class=None, object_id=None, position=None):
+        super(PointLabel, self).__init__(label_class, object_id)
         if position is None:
             position = Vector2()
         self.position = position
@@ -242,9 +252,9 @@ class PointLabel (AbstractLabel):
         warped_verts = Vector2.from_array(xform_fn(Vector2.as_array([self.position])))
         return PointLabel(warped_verts[0], self.label_class)
 
-    def render_mask(self, width, height, fill):
+    def render_mask(self, width, height, fill, dx=0.0, dy=0.0):
         img = Image.new('L', (width, height), 0)
-        ImageDraw.Draw(img).point([(self.position.x, self.position.y)], fill=0)
+        ImageDraw.Draw(img).point([(self.position.x + dx, self.position.y + dy)], fill=0)
         mask = np.array(img)
         return mask
 
@@ -254,8 +264,8 @@ class PointLabel (AbstractLabel):
         return j
 
     @classmethod
-    def from_json(cls, root, j):
-        return PointLabel(root, label_class=j['label_class'], object_id=j['object_id'],
+    def from_json(cls, j):
+        return PointLabel(label_class=j['label_class'], object_id=j.get('object_id'),
                           position=Vector2.from_json(j['position']))
 
 
@@ -263,8 +273,8 @@ class PointLabel (AbstractLabel):
 class BoxLabel (AbstractLabel):
     JSON_NAME = 'box'
 
-    def __init__(self, root, label_class=None, object_id=None, centre=None, size=None):
-        super(BoxLabel, self).__init__(root, label_class, object_id)
+    def __init__(self, label_class=None, object_id=None, centre=None, size=None):
+        super(BoxLabel, self).__init__(label_class, object_id)
         if centre is None:
             centre = Vector2()
         if size is None:
@@ -296,9 +306,10 @@ class BoxLabel (AbstractLabel):
         warped_box = AABox.from_points(warped_corners)
         return BoxLabel(warped_box.centre, warped_box.size, self.label_class)
 
-    def render_mask(self, width, height, fill):
-        lower = self.aabox.lower
-        upper = self.aabox.upper
+    def render_mask(self, width, height, fill, dx=0.0, dy=0.0):
+        d = Vector2(dx, dy)
+        lower = self.aabox.lower + d
+        upper = self.aabox.upper + d
         img = Image.new('L', (width, height), 0)
         if fill:
             ImageDraw.Draw(img).rectangle([(lower.x, lower.y), (upper.x, upper.y)], outline=1, fill=1)
@@ -314,17 +325,17 @@ class BoxLabel (AbstractLabel):
         return j
 
     @classmethod
-    def from_json(cls, root, j):
-        return BoxLabel(root, label_class=j['label_class'], object_id=j['object_id'],
+    def from_json(cls, j):
+        return BoxLabel(label_class=j['label_class'], object_id=j.get('object_id'),
                         centre=Vector2.from_json(j['centre']), size=Vector2.from_json(j['size']))
 
 
 @register_label_class
 class PolygonLabel (AbstractLabel):
-    JSON_NAME = 'box'
+    JSON_NAME = 'polygon'
 
-    def __init__(self, root, label_class=None, object_id=None, vertices=None):
-        super(PolygonLabel, self).__init__(root, label_class, object_id)
+    def __init__(self, label_class=None, object_id=None, vertices=None):
+        super(PolygonLabel, self).__init__(label_class, object_id)
         if vertices is None:
             vertices = []
         self.vertices = vertices
@@ -343,15 +354,18 @@ class PolygonLabel (AbstractLabel):
         warped_verts = Vector2.from_array(xform_fn(Vector2.as_array(self.vertices)))
         return PolygonLabel(warped_verts, self.label_class)
 
-    def render_mask(self, width, height, fill):
-        polygon = [(v.x, v.y)  for v in self.vertices]
-        img = Image.new('L', (width, height), 0)
-        if fill:
-            ImageDraw.Draw(img).polygon(polygon, outline=1, fill=1)
+    def render_mask(self, width, height, fill, dx=0.0, dy=0.0):
+        if len(self.vertices) >= 3:
+            polygon = [(v.x + dx, v.y + dy)  for v in self.vertices]
+            img = Image.new('L', (width, height), 0)
+            if fill:
+                ImageDraw.Draw(img).polygon(polygon, outline=1, fill=1)
+            else:
+                ImageDraw.Draw(img).polygon(polygon, outline=1, fill=0)
+            mask = np.array(img)
+            return mask
         else:
-            ImageDraw.Draw(img).polygon(polygon, outline=1, fill=0)
-        mask = np.array(img)
-        return mask
+            return None
 
     def as_json(self):
         j = super(PolygonLabel, self).as_json()
@@ -359,8 +373,8 @@ class PolygonLabel (AbstractLabel):
         return j
 
     @classmethod
-    def from_json(cls, root, j):
-        return PolygonLabel(root, label_class=j['label_class'], object_id=j['object_id'],
+    def from_json(cls, j):
+        return PolygonLabel(label_class=j['label_class'], object_id=j.get('object_id'),
                             vertices=[Vector2.from_json(j_v) for j_v in j['vertices']])
 
 
@@ -368,8 +382,8 @@ class PolygonLabel (AbstractLabel):
 class CompositeLabel (AbstractLabel):
     JSON_NAME = 'composite'
 
-    def __init__(self, root, label_class=None, object_id=None, component_object_ids=None):
-        super(CompositeLabel, self).__init__(root, label_class, object_id)
+    def __init__(self, label_class=None, object_id=None, component_object_ids=None):
+        super(CompositeLabel, self).__init__(label_class, object_id)
         if component_object_ids is None:
             component_object_ids = []
         self.component_object_ids = component_object_ids
@@ -378,6 +392,8 @@ class CompositeLabel (AbstractLabel):
 
     @property
     def component_models(self):
+        if self.root is None:
+            raise ValueError('Cannot get component_models as this label has not been registered with a root')
         if self.__component_models is None:
             self.__component_models = [self.root.get_label_by_id(obj_id) for obj_id in self.component_object_ids]
         return self.__component_models
@@ -394,7 +410,7 @@ class CompositeLabel (AbstractLabel):
         """
         return CompositeLabel(self.component_object_ids, self.label_class, self.object_id)
 
-    def render_mask(self, width, height, fill):
+    def render_mask(self, width, height, fill, dx=0.0, dy=0.0):
         return None
 
     def as_json(self):
@@ -403,8 +419,8 @@ class CompositeLabel (AbstractLabel):
         return j
 
     @classmethod
-    def from_json(cls, root, j):
-        return CompositeLabel(root=root, label_class=j['label_class'], object_id=j['object_id'],
+    def from_json(cls, j):
+        return CompositeLabel(label_class=j['label_class'], object_id=j.get('object_id'),
                               component_object_ids=j['components'])
 
 
@@ -412,8 +428,8 @@ class CompositeLabel (AbstractLabel):
 class GroupLabel (AbstractLabel):
     JSON_NAME = 'group'
 
-    def __init__(self, root, label_class=None, object_id=None, component_models=None):
-        super(GroupLabel, self).__init__(root, label_class, object_id)
+    def __init__(self, label_class=None, object_id=None, component_models=None):
+        super(GroupLabel, self).__init__(label_class, object_id)
         if component_models is None:
             component_models = []
         self.component_models = component_models
@@ -433,8 +449,18 @@ class GroupLabel (AbstractLabel):
         return GroupLabel([model.warped(xform_fn) for model in self.component_models],
                           self.label_class, self.object_id)
 
-    def render_mask(self, width, height, fill):
+    def render_mask(self, width, height, fill, dx=0.0, dy=0.0):
         return None
+
+    def notify_registered(self, root):
+        super(GroupLabel, self).notify_registered(root)
+        for model in self.component_models:
+            root.register_label(model)
+
+    def notify_unregistered(self, root):
+        for model in self.component_models:
+            root.unregister_label(model)
+        super(GroupLabel, self).notify_unregistered(root)
 
     def as_json(self):
         j = super(GroupLabel, self).as_json()
@@ -442,34 +468,284 @@ class GroupLabel (AbstractLabel):
         return j
 
     @classmethod
-    def from_json(cls, root, j):
-        return GroupLabel(root=root, label_class=j['label_class'], object_id=j['object_id'],
+    def from_json(cls, j):
+        return GroupLabel(label_class=j['label_class'], object_id=j.get('object_id'),
                           component_models=[json_to_label(j_l) for j_l in j['component_models']])
 
 
 
-class ImageLabelsRoot (object):
-    def __init__(self):
+class ImageLabels (object):
+    def __init__(self, labels=None):
         self.labels = []
         self._object_id_to_label = {}
+        self._object_id_counter = 1
+        for label in labels:
+            self.register_label(label)
+            self.labels.append(label)
 
 
-    def label_from_json(self, j):
-        label_type_cls = _LABEL_TYPE_REGISTRY[j['label_type']]
-        return label_type_cls.from_json(j)
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, item):
+        return self.labels[item]
 
 
-    def register_label(self, object_id, label):
-        self._object_id_to_label[object_id] = label
+    def add_label(self, label):
+        self.labels.append(label)
+
+
+    def register_label(self, label):
+        if label.root is not None:
+            raise ValueError('Label already registered with a root')
+
+        if label.object_id is not None:
+            self._object_id_to_label[label.object_id] = label
+            self._object_id_counter = max(self._object_id_counter, label.object_id + 1)
+        label.notify_registered(self)
+
+    def unregister_label(self, label):
+        label.notify_unregistered(self)
+        del self._object_id_to_label[label.object_id]
+
+
+
+    def warped(self, xform_fn):
+        """
+        Warp the labels given a warping function
+
+        :param xform_fn: a transformation function of the form `f(vertices) -> warped_vertices`, where `vertices` and
+        `warped_vertices` are both Numpy arrays of shape `(N,2)` where `N` is the number of vertices and the
+        co-ordinates are `x,y` pairs. The transformations defined in `skimage.transform`, e.g. `AffineTransform` can
+        be used here.
+        :return: an `ImageLabels` instance that contains the warped labels
+        """
+        labels = [label.warped(xform_fn) for label in self.labels]
+        return ImageLabels(labels)
+
+
+    def render_labels(self, label_classes, image_shape, pixels_as_vectors=False, fill=True):
+        """
+        Render the labels to create a label image
+
+        :param label_classes: a sequence of classes. If an item is a list or tuple, the classes contained
+            within are mapped to the same label index.
+            Each class should be a `LabelClass` instance, a string.
+        :param image_shape: `(height, width)` tuple specifying the shape of the image to be returned
+        :param pixels_as_vectors: If `False`, return an (height,width) array of dtype=int with pixels numbered
+            according to their label. If `True`, return a (height,width,n_labels) array of dtype=float32 with each pixel
+            being a feature vector that gives the weight of each label, where n_labels is `len(label_classes)`
+        :param fill: if True, labels will be filled, otherwise they will be outlined
+        :return: (H,W) array with dtype=int if pixels_as_vectors is False, otherwise (H,W,n_labels) with dtype=float32
+        """
+        if isinstance(label_classes, list) or isinstance(label_classes, tuple):
+            cls_to_index = {}
+            for i, cls in enumerate(label_classes):
+                if isinstance(cls, LabelClass):
+                    cls_to_index[cls.name] = i
+                elif isinstance(cls, str)  or  isinstance(cls, unicode)  or  cls is None:
+                    cls_to_index[cls] = i
+                elif isinstance(cls, list)  or  isinstance(cls, tuple):
+                    for c in cls:
+                        if isinstance(c, LabelClass):
+                            cls_to_index[c.name] = i
+                        elif isinstance(c, str)  or  isinstance(c, unicode)  or  c is None:
+                            cls_to_index[c] = i
+                        else:
+                            raise TypeError, 'Item {0} in label_classes is a list that contains an item that is not a LabelClass or a string but a {1}'.format(i, type(c).__name__)
+                else:
+                    raise TypeError, 'Item {0} in label_classes is not a LabelClass, string or list, but a {1}'.format(i, type(cls).__name__)
+        else:
+            raise TypeError, 'label_classes must be a sequence that can contain LabelClass instances, strings or sub-sequences of the former'
+
+
+        height, width = image_shape
+
+        if pixels_as_vectors:
+            label_image = np.zeros((height, width, len(label_classes)), dtype='float32')
+        else:
+            label_image = np.zeros((height, width), dtype=int)
+
+        for label in self._object_id_to_label.values():
+            label_cls_n = cls_to_index.get(label.label_class, None)
+            if label_cls_n is not None:
+                mask = label.render_mask(width, height, fill)
+                if mask is not None:
+                    if pixels_as_vectors:
+                        label_image[:,:,label_cls_n] += mask
+                        label_image[:,:,label_cls_n] = np.clip(label_image[:,:,label_cls_n], 0.0, 1.0)
+                    else:
+                        label_image[mask >= 0.5] = label_cls_n + 1
+
+        return label_image
+
+
+    def render_individual_labels(self, label_classes, image_shape, fill=True):
+        """
+        Render individual labels to create a label image.
+        The resulting image is a multi-channel image, with a channel for each class in `label_classes`.
+        Each individual label's class is used to select the channel that it is rendered into.
+        Each label is given a different index that is rendered into the resulting image.
+
+        :param label_classes: a sequence of classes. If an item is a list or tuple, the classes contained
+            within are mapped to the same label index.
+            Each class should be a `LabelClass` instance, a string.
+            Each entry within label_classes will have a corresponding channel in the output image
+        :param image_shape: `(height, width)` tuple specifying the shape of the image to be returned
+        :param fill: if True, labels will be filled, otherwise they will be outlined
+        :param image_shape: `None`, or a `(height, width)` tuple specifying the shape of the image to be rendered
+        :return: tuple of (label_image, label_counts) where:
+            label_image is a (H,W,C) array with dtype=int
+            label_counts is a 1D array of length C (number of channels) that contains the number of labels drawn for each channel; effectively the maximum value found in each channel
+        """
+        # Create `cls_to_channel`
+        if isinstance(label_classes, list) or isinstance(label_classes, tuple):
+            cls_to_channel = {}
+            for i, cls in enumerate(label_classes):
+                if isinstance(cls, LabelClass):
+                    cls_to_channel[cls.name] = i
+                elif isinstance(cls, str)  or  isinstance(cls, unicode)  or  cls is None:
+                    cls_to_channel[cls] = i
+                elif isinstance(cls, list)  or  isinstance(cls, tuple):
+                    for c in cls:
+                        if isinstance(c, LabelClass):
+                            cls_to_channel[c.name] = i
+                        elif isinstance(c, str)  or  isinstance(c, unicode):
+                            cls_to_channel[c] = i
+                        else:
+                            raise TypeError, 'Item {0} in label_classes is a list that contains an item that is not a LabelClass or a string but a {1}'.format(i, type(c).__name__)
+                else:
+                    raise TypeError, 'Item {0} in label_classes is not a LabelClass, string or list, but a {1}'.format(i, type(cls).__name__)
+        else:
+            raise TypeError, 'label_classes must be a sequence that can contain LabelClass instances, strings or sub-sequences of the former'
+
+
+        height, width = image_shape
+
+        label_image = np.zeros((height, width, len(label_classes)), dtype=int)
+
+        channel_label_count = [0] * len(label_classes)
+
+        for label in self._object_id_to_label.values():
+            label_channel = cls_to_channel.get(label.label_class, None)
+            if label_channel is not None:
+                mask = label.render_mask(width, height, fill)
+
+                if mask is not None:
+                    value = channel_label_count[label_channel]
+                    channel_label_count[label_channel] += 1
+
+                    label_image[mask >= 0.5, label_channel] = value + 1
+
+        return label_image, np.array(channel_label_count)
+
+
+    def extract_label_images(self, image_2d, label_class_set=None):
+        """
+        Extract an image of each labelled entity from a given image.
+        The resulting image is the original image masked with an alpha channel that results from rendering the label
+
+        :param image_2d: the image from which to extract images of labelled objects
+        :param label_class_set: a sequence of classes whose labels should be rendered, or None for all labels
+        :return: a list of (H,W,C) image arrays
+        """
+        image_shape = image_2d.shape[:2]
+
+        label_images = []
+
+        for label in self._object_id_to_label.values():
+            if label_class_set is None  or  label.label_class in label_class_set:
+                lx = int(math.floor(label.aabox.lower.x))
+                ly = int(math.floor(label.aabox.lower.y))
+                ux = int(math.ceil(label.aabox.upper.x))
+                uy = int(math.ceil(label.aabox.upper.y))
+
+                # Given that the images and labels may have been warped by a transformation,
+                # there is no guarantee that they lie within the bounds of the image
+                lx = max(min(lx, image_shape[1]), 0)
+                ux = max(min(ux, image_shape[1]), 0)
+                ly = max(min(ly, image_shape[0]), 0)
+                uy = max(min(uy, image_shape[0]), 0)
+
+                w = ux - lx
+                h = uy - ly
+
+                if w > 0  and  h > 0:
+                    mask = label.render_mask(w, h, fill=True, dx=float(-lx), dy=float(-ly))
+
+                    if mask is not None and (mask > 0).any():
+                        img_box = image_2d[ly:uy, lx:ux]
+                        if len(img_box.shape) == 2:
+                            # Convert greyscale image to RGB:
+                            img_box = gray2rgb(img_box)
+                        # Append the mask as an alpha channel
+                        object_img = np.append(img_box, mask[:,:,None], axis=2)
+
+                        label_images.append(object_img)
+
+        return label_images
 
 
     @classmethod
+    def from_contours(cls, list_of_contours, label_classes=None):
+        """
+        Convert a list of contours to an `ImageLabels` instance.
+
+        :param list_of_contours: list of contours, where each contour is an `(N,2)` numpy array.
+                where `N` is the number of vertices, each of which is a `(y,x)` pair.
+        :param label_classes: [optional] a list of the same length as `list_of_contours` that provides
+                the label class of each contour
+        :return: an `ImageLabels` instance containing the labels extracted from the contours
+        """
+        labels = []
+        if not isinstance(label_classes, list):
+            label_classes = [label_classes] * len(list_of_contours)
+        for contour, lcls in zip(list_of_contours, label_classes):
+            vertices = [Vector2(contour[i][1], contour[i][0])   for i in xrange(contour.shape[0])]
+            label = PolygonLabel(label_class=lcls, vertices=vertices)
+            labels.append(label)
+        return cls(labels)
+
+
+    @classmethod
+    def from_label_image(cls, labels):
+        """
+        Convert a integer label mask image to an `ImageLabels` instance.
+
+        :param labels: a `(h,w)` numpy array of dtype `int32` that gives an integer label for each
+                pixel in the image. Label values start at 1; pixels with a value of 0 will not be
+                included in the returned labels.
+        :return: an `ImageLabels` instance containing the labels extracted from the label mask image
+        """
+        contours = []
+        for i in xrange(1, labels.max()+1):
+            lmask = labels == i
+
+            if lmask.sum() > 0:
+                mask_positions = np.argwhere(lmask)
+                (ystart, xstart), (ystop, xstop) = mask_positions.min(0), mask_positions.max(0) + 1
+
+                if ystop >= ystart+1 and xstop >= xstart+1:
+                    mask_trim = lmask[ystart:ystop, xstart:xstop]
+                    mask_trim = pad(mask_trim, [(1,1), (1,1)], mode='constant').astype(np.float32)
+                    cs = find_contours(mask_trim, 0.5)
+                    for contour in cs:
+                        simp = _simplify_contour(contour + np.array((ystart, xstart)) - np.array([[1.0, 1.0]]))
+                        if simp is not None:
+                            contours.append(simp)
+        return cls.from_contours(contours)
+
+
+    def as_json(self):
+        return [label.as_json() for label in self.labels]
+
+    @classmethod
     def from_json(cls, j):
-        pass
+        return cls([json_to_label(l_j) for l_j in j])
 
 
 
-class ImageLabels (object):
+class ImageLabelsOld (object):
     """
     Represents labels in vector format, stored in JSON form. Has methods for
     manipulating and rendering them.
@@ -512,7 +788,7 @@ class ImageLabels (object):
                 pass
             else:
                 raise TypeError, 'Unknown label type {0}'.format(label_type)
-        return ImageLabels(labels)
+        return ImageLabelsOld(labels)
 
 
     def render_labels(self, label_classes, image_shape, pixels_as_vectors=False, fill=True):
@@ -812,11 +1088,11 @@ class AbsractLabelledImage (object):
     @property
     def labels_json(self):
         labels = self.labels
-        return labels.labels_json if labels is not None else None
+        return labels.as_json() if labels is not None else None
 
     @labels_json.setter
     def labels_json(self, l):
-        self.labels = ImageLabels(l)
+        self.labels = ImageLabels.from_json(l)
 
 
     @property
@@ -887,7 +1163,7 @@ class InMemoryLabelledImage (AbsractLabelledImage):
     def __init__(self, pixels, labels=None, complete=False):
         super(InMemoryLabelledImage, self).__init__()
         if labels is None:
-            labels = ImageLabels([])
+            labels = ImageLabels()
         self.__pixels = pixels
         self.__labels = labels
         self.__complete = complete
@@ -1002,7 +1278,7 @@ class PersistentLabelledImage (AbsractLabelledImage):
                     except ValueError:
                         pass
                     else:
-                        self.__labels, self.__complete = self.__unwrap_labels(self.image_path, wrapped)
+                        self.__labels, self.__complete = self.__import_labels(self.image_path, wrapped)
         return self.__labels, self.__complete
 
     def __set_label_data(self, labels, complete):
@@ -1014,27 +1290,27 @@ class PersistentLabelledImage (AbsractLabelledImage):
                 if os.path.exists(self.__labels_path):
                     os.remove(self.__labels_path)
             else:
-                wrapped = self.__wrap_labels(self.image_path, labels, complete)
+                wrapped = self.__export_labels(self.image_path, labels, complete)
                 with open(self.__labels_path, 'w') as f:
                     json.dump(wrapped, f, indent=3)
 
 
 
     @staticmethod
-    def __wrap_labels(image_path, labels, complete):
+    def __export_labels(image_path, labels, complete):
         image_filename = os.path.split(image_path)[1]
         return {'image_filename': image_filename,
-                'labels': labels.labels_json,
+                'labels': labels.as_json(),
                 'complete': complete}
 
     @staticmethod
-    def __unwrap_labels(image_path, wrapped_labels):
-        if isinstance(wrapped_labels, dict):
-            return ImageLabels(wrapped_labels['labels']), wrapped_labels.get('complete', False)
-        elif isinstance(wrapped_labels, list):
-            return ImageLabels(wrapped_labels), False
+    def __import_labels(image_path, wrapped_labels_json):
+        if isinstance(wrapped_labels_json, dict):
+            return ImageLabels.from_json(wrapped_labels_json['labels']), wrapped_labels_json.get('complete', False)
+        elif isinstance(wrapped_labels_json, list):
+            return ImageLabels.from_json(wrapped_labels_json), False
         else:
-            raise TypeError, 'Labels loaded from file must either be a dict or a list, not a {0}'.format(type(wrapped_labels))
+            raise TypeError, 'Labels loaded from file must either be a dict or a list, not a {0}'.format(type(wrapped_labels_json))
 
 
     @staticmethod
@@ -1059,7 +1335,7 @@ class LabelledImageFile (AbsractLabelledImage):
     def __init__(self, path, labels=None, complete=False, on_set_labels=None):
         super(LabelledImageFile, self).__init__()
         if labels is None:
-            labels = ImageLabels([])
+            labels = ImageLabels()
         self.__labels = labels
         self.__complete = complete
         self.__image_path = path
