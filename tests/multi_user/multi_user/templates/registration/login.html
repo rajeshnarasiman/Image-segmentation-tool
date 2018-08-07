@@ -1,0 +1,21 @@
+{% extends "page_base_with_title.html" %}
+
+{% load widget_tweaks %}
+
+{% block title %}Login{% endblock title %}
+{% block pagetitle %}Login{% endblock pagetitle %}
+
+
+{% block pagecontent %}
+
+	<form action="/login" method="POST">
+        {% csrf_token %}
+	    <table class="login_form_table">
+            <tr><td>Username:</td><td>{{ form.username|add_class:'form-control' }}</td></tr>
+            <tr><td>Password:</td><td>{{ form.password|add_class:'form-control' }}</td></tr>
+            <tr><td></td><td><input type="submit" value="Login" class="btn btn-primary"></td></tr>
+        </table>
+	</form>
+
+{% endblock %}
+

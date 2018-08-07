@@ -1,5 +1,5 @@
 import os, mimetypes, json, datetime
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import BaseCommand
 from django.core.files import File
 from image_labelling_tool import labelling_tool
 from image_labelling_tool import models as lt_models

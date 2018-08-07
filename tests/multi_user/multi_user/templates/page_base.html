@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block navbar %}
+<div class="nav_bar_container">
+	<div class="nav_bar">
+		<div class="nav_header">Image labelling tool</div>
+		<ul class="nav_menu">
+            {% if user.is_authenticated %}
+			    <li><a href="{% url "msmain:logout" %}">Logout</a></li>
+            {% else %}
+			    <li><a href="{% url "msmain:login" %}">Login</a></li>
+            {% endif %}
+            <li><a href="{% url "msmain:home" %}">Home</a></li>
+            {% if user.is_staff %}
+			    <li><a href="{% url "msmain:django_admin" %}">DB Admin system</a></li>
+            {% endif %}
+
+		</ul>
+	</div>
+</div>
+<div class="below_nav_bar_spacer"> </div>
+{% endblock navbar %}
+
